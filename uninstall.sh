@@ -35,6 +35,20 @@ else
     echo ":: You may need to reinstall ml4w-hyprland dotfiles to restore the original script"
 fi
 
+# -----------------------------------------------------
+# Restore waypaper.sh
+# -----------------------------------------------------
+
+WAYPAPER_SH="$HOME/.config/hypr/scripts/waypaper.sh"
+WAYPAPER_BAK="${WAYPAPER_SH}.bak"
+
+if [ -f "$WAYPAPER_BAK" ]; then
+    mv "$WAYPAPER_BAK" "$WAYPAPER_SH"
+    echo ":: waypaper.sh restored from backup"
+else
+    echo ":: WARNING: No waypaper.sh backup found at $WAYPAPER_BAK"
+fi
+
 # Clean up rotation history
 rm -f "$HOME/.cache/ml4w/hyprland-dotfiles/rotation-history"
 

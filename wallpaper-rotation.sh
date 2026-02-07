@@ -43,10 +43,99 @@ fi
 wp_folder_setting="$HOME/.config/ml4w/settings/wallpaper-folder"
 if [ -f "$wp_folder_setting" ]; then
     wp_folder=$(cat "$wp_folder_setting")
-    # Expand $HOME if present
+    # Expand ~ and $HOME
+    wp_folder="${wp_folder/#\~/$HOME}"
     wp_folder="${wp_folder/\$HOME/$HOME}"
-else
+fi
+
+# Fall back to waypaper config, then default
+if [ -z "$wp_folder" ] || [ ! -d "$wp_folder" ]; then
+    waypaper_conf="$HOME/.config/waypaper/config.ini"
+    if [ -f "$waypaper_conf" ]; then
+        wp_folder=$(grep -oP '^folder\s*=\s*\K.*' "$waypaper_conf" | tr -d ' ')
+        wp_folder="${wp_folder/#\~/$HOME}"
+        wp_folder="${wp_folder/\$HOME/$HOME}"
+    fi
+fi
+
+if [ -z "$wp_folder" ] || [ ! -d "$wp_folder" ]; then
     wp_folder="$HOME/.config/ml4w/wallpapers"
+fi
+
+# -----------------------------------------------------
+# --once mode: pick random wallpapers, apply, exit
+# -----------------------------------------------------
+
+if [ "$1" = "--once" ]; then
+    # List wallpapers (common image extensions)
+    mapfile -t all_wallpapers < <(find "$wp_folder" -maxdepth 1 -type f \( \
+        -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \
+        -o -iname '*.webp' -o -iname '*.gif' -o -iname '*.bmp' \
+    \) | sort)
+
+    total=${#all_wallpapers[@]}
+    if [ "$total" -lt 2 ]; then
+        echo ":: ERROR: Need at least 2 wallpapers in $wp_folder"
+        exit 1
+    fi
+
+    # Read history (last 2 used wallpapers)
+    exclude1=""
+    exclude2=""
+    if [ -f "$history_file" ]; then
+        exclude1=$(sed -n '1p' "$history_file")
+        exclude2=$(sed -n '2p' "$history_file")
+    fi
+
+    # Build pool excluding history
+    pool=()
+    for wp in "${all_wallpapers[@]}"; do
+        if [ "$wp" != "$exclude1" ] && [ "$wp" != "$exclude2" ]; then
+            pool+=("$wp")
+        fi
+    done
+
+    # Fallback if pool too small
+    if [ "${#pool[@]}" -lt 2 ]; then
+        pool=("${all_wallpapers[@]}")
+    fi
+
+    # Pick 2 random wallpapers
+    mapfile -t picks < <(printf '%s\n' "${pool[@]}" | shuf -n 2)
+    wp1="${picks[0]}"
+    wp2="${picks[1]}"
+
+    echo ":: DP-1: $(basename "$wp1")"
+    echo ":: DP-2: $(basename "$wp2")"
+
+    # Set DP-1
+    swww img "$wp1" \
+        --outputs DP-1 \
+        --transition-type grow \
+        --transition-step 90 \
+        --transition-duration 2
+
+    # Set DP-2
+    swww img "$wp2" \
+        --outputs DP-2 \
+        --transition-type grow \
+        --transition-step 90 \
+        --transition-duration 2
+
+    # Run the full ml4w pipeline for DP-1 (matugen, blur, lockscreen, waybar, etc.)
+    "$HOME/.config/hypr/scripts/wallpaper.sh" "$wp1"
+
+    # Re-apply DP-2 wallpaper in case wallpaper.sh reset all monitors
+    swww img "$wp2" \
+        --outputs DP-2 \
+        --transition-type grow \
+        --transition-step 90 \
+        --transition-duration 2
+
+    # Write history
+    printf '%s\n%s\n' "$wp1" "$wp2" > "$history_file"
+
+    exit 0
 fi
 
 # -----------------------------------------------------
