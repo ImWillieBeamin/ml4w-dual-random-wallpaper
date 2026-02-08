@@ -9,10 +9,25 @@
 # Per-monitor wallpaper rotation for dual-monitor setups (DP-1 / DP-2)
 # Drop-in replacement for ml4w wallpaper-automation.sh
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 ml4w_cache_folder="$HOME/.cache/ml4w/hyprland-dotfiles"
 marker_file="$ml4w_cache_folder/wallpaper-automation"
 history_file="$ml4w_cache_folder/rotation-history"
+
+# Logging
+LOG_FILE="$HOME/.cache/ml4w/hyprland-dotfiles/wallpaper-rotation.log"
+mkdir -p "$(dirname "$LOG_FILE")"
+
+# Truncate log if over 100KB (keep last ~500 lines)
+if [ -f "$LOG_FILE" ] && [ "$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)" -gt 102400 ]; then
+    tail -n 500 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
+fi
+
+exec >> "$LOG_FILE" 2>&1
+
+_log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
 
 # Notifications
 source "$HOME/.config/ml4w/scripts/notification-handler.sh"
@@ -24,17 +39,42 @@ NOTIFICATION_ICON="preferences-desktop-wallpaper-symbolic"
 # -----------------------------------------------------
 
 conf_file="$SCRIPT_DIR/rotation.conf"
-if [ -f "$conf_file" ]; then
-    source "$conf_file"
-else
-    DAYS=0
-    HOURS=1
-    MINUTES=0
-fi
-interval=$(( DAYS * 86400 + HOURS * 3600 + MINUTES * 60 ))
-if [ "$interval" -lt 10 ]; then
-    interval=10
-fi
+
+_load_config() {
+    SECS=0
+    if [ -f "$conf_file" ]; then
+        source "$conf_file"
+    else
+        DAYS=0
+        HOURS=1
+        MINUTES=0
+        SECS=0
+    fi
+    interval=$(( DAYS * 86400 + HOURS * 3600 + MINUTES * 60 + SECS ))
+    if [ "$interval" -lt 10 ]; then
+        interval=10
+    fi
+}
+
+_build_human_interval() {
+    human_interval=""
+    if [ "$DAYS" -gt 0 ]; then
+        human_interval="${DAYS}d "
+    fi
+    if [ "$HOURS" -gt 0 ]; then
+        human_interval="${human_interval}${HOURS}h "
+    fi
+    if [ "$MINUTES" -gt 0 ]; then
+        human_interval="${human_interval}${MINUTES}m "
+    fi
+    if [ "$SECS" -gt 0 ]; then
+        human_interval="${human_interval}${SECS}s"
+    fi
+    human_interval="${human_interval:-${interval}s}"
+}
+
+_load_config
+_build_human_interval
 
 # -----------------------------------------------------
 # Determine wallpaper folder
@@ -67,6 +107,14 @@ fi
 # -----------------------------------------------------
 
 if [ "$1" = "--once" ]; then
+    # Prevent concurrent --once invocations (e.g., keybind spam)
+    LOCK_FILE="/tmp/wallpaper-rotation-once.lock"
+    exec 200>"$LOCK_FILE"
+    if ! flock -n 200; then
+        _log ":: Wallpaper change already in progress, skipping"
+        exit 0
+    fi
+
     # List wallpapers (common image extensions)
     mapfile -t all_wallpapers < <(find "$wp_folder" -maxdepth 1 -type f \( \
         -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \
@@ -75,7 +123,7 @@ if [ "$1" = "--once" ]; then
 
     total=${#all_wallpapers[@]}
     if [ "$total" -lt 2 ]; then
-        echo ":: ERROR: Need at least 2 wallpapers in $wp_folder"
+        _log ":: ERROR: Need at least 2 wallpapers in $wp_folder"
         exit 1
     fi
 
@@ -105,32 +153,32 @@ if [ "$1" = "--once" ]; then
     wp1="${picks[0]}"
     wp2="${picks[1]}"
 
-    echo ":: DP-1: $(basename "$wp1")"
-    echo ":: DP-2: $(basename "$wp2")"
+    _log ":: DP-1: $(basename "$wp1")"
+    _log ":: DP-2: $(basename "$wp2")"
 
     # Set DP-1
     swww img "$wp1" \
         --outputs DP-1 \
         --transition-type grow \
         --transition-step 90 \
-        --transition-duration 2
+        --transition-duration 2 >/dev/null 2>&1
 
     # Set DP-2
     swww img "$wp2" \
         --outputs DP-2 \
         --transition-type grow \
         --transition-step 90 \
-        --transition-duration 2
+        --transition-duration 2 >/dev/null 2>&1
 
     # Run the full ml4w pipeline for DP-1 (matugen, blur, lockscreen, waybar, etc.)
-    "$HOME/.config/hypr/scripts/wallpaper.sh" "$wp1"
+    "$HOME/.config/hypr/scripts/wallpaper.sh" "$wp1" >/dev/null 2>&1
 
     # Re-apply DP-2 wallpaper in case wallpaper.sh reset all monitors
     swww img "$wp2" \
         --outputs DP-2 \
         --transition-type grow \
         --transition-step 90 \
-        --transition-duration 2
+        --transition-duration 2 >/dev/null 2>&1
 
     # Write history
     printf '%s\n%s\n' "$wp1" "$wp2" > "$history_file"
@@ -148,7 +196,7 @@ if [ -f "$marker_file" ]; then
         --a "${APP_NAME}" \
         --i "${NOTIFICATION_ICON}" \
         --m "Wallpaper rotation stopped."
-    echo ":: Wallpaper rotation stopped"
+    _log ":: Wallpaper rotation stopped"
     # Kill other instances of this script
     other_pids=$(pgrep -f "wallpaper-automation.sh" | grep -v "$$")
     if [ -n "$other_pids" ]; then
@@ -176,29 +224,25 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT SIGHUP
 
-human_interval=""
-if [ "$DAYS" -gt 0 ]; then
-    human_interval="${DAYS}d "
-fi
-if [ "$HOURS" -gt 0 ]; then
-    human_interval="${human_interval}${HOURS}h "
-fi
-if [ "$MINUTES" -gt 0 ]; then
-    human_interval="${human_interval}${MINUTES}m"
-fi
-human_interval="${human_interval:-${interval}s}"
-
 notify_user \
     --a "${APP_NAME}" \
     --i "${NOTIFICATION_ICON}" \
     --m "Wallpaper rotation started.\nInterval: ${human_interval}\nMonitors: DP-1, DP-2"
-echo ":: Wallpaper rotation started (interval: ${interval}s)"
+_log ":: Wallpaper rotation started (interval: ${interval}s)"
 
 # -----------------------------------------------------
 # Main loop
 # -----------------------------------------------------
 
 while [ -f "$marker_file" ]; do
+
+    # Re-read config (allows live changes without restart)
+    _old_interval="$interval"
+    _load_config
+    _build_human_interval
+    if [ "$interval" != "$_old_interval" ]; then
+        _log ":: Config changed: interval is now ${human_interval} (${interval}s)"
+    fi
 
     # List wallpapers (common image extensions)
     mapfile -t all_wallpapers < <(find "$wp_folder" -maxdepth 1 -type f \( \
@@ -208,7 +252,7 @@ while [ -f "$marker_file" ]; do
 
     total=${#all_wallpapers[@]}
     if [ "$total" -lt 2 ]; then
-        echo ":: ERROR: Need at least 2 wallpapers in $wp_folder"
+        _log ":: ERROR: Need at least 2 wallpapers in $wp_folder"
         sleep "$interval"
         continue
     fi
@@ -231,7 +275,7 @@ while [ -f "$marker_file" ]; do
 
     # Fallback if pool too small
     if [ "${#pool[@]}" -lt 2 ]; then
-        echo ":: WARNING: Pool too small after exclusions, using full wallpaper list"
+        _log ":: WARNING: Pool too small after exclusions, using full wallpaper list"
         pool=("${all_wallpapers[@]}")
     fi
 
@@ -240,25 +284,25 @@ while [ -f "$marker_file" ]; do
     wp1="${picks[0]}"
     wp2="${picks[1]}"
 
-    echo ":: DP-1: $(basename "$wp1")"
-    echo ":: DP-2: $(basename "$wp2")"
+    _log ":: DP-1: $(basename "$wp1")"
+    _log ":: DP-2: $(basename "$wp2")"
 
     # Set DP-1
     swww img "$wp1" \
         --outputs DP-1 \
         --transition-type grow \
         --transition-step 90 \
-        --transition-duration 2
+        --transition-duration 2 >/dev/null 2>&1
 
     # Set DP-2
     swww img "$wp2" \
         --outputs DP-2 \
         --transition-type grow \
         --transition-step 90 \
-        --transition-duration 2
+        --transition-duration 2 >/dev/null 2>&1
 
     # Run the full ml4w pipeline for DP-1 (matugen, blur, lockscreen, waybar, etc.)
-    "$HOME/.config/hypr/scripts/wallpaper.sh" "$wp1"
+    "$HOME/.config/hypr/scripts/wallpaper.sh" "$wp1" >/dev/null 2>&1
 
     # Re-apply DP-2 wallpaper in case wallpaper.sh's effects mode
     # called `waypaper --wallpaper` which resets all monitors
@@ -266,12 +310,12 @@ while [ -f "$marker_file" ]; do
         --outputs DP-2 \
         --transition-type grow \
         --transition-step 90 \
-        --transition-duration 2
+        --transition-duration 2 >/dev/null 2>&1
 
     # Write history
     printf '%s\n%s\n' "$wp1" "$wp2" > "$history_file"
 
-    echo ":: Next rotation in ${interval}s..."
+    _log ":: Next rotation in ${human_interval} (${interval}s)..."
     sleep "$interval" &
     wait $!
 done
